@@ -1,3 +1,8 @@
+## Доработки
+Небольшие изменения в коде для поддержки Python 3.6
+
+Сохранение всех картинок из поста, а не только первой
+
 ## The goal
 
 The goal of this script is to let you completely export your content hosted on Tumblr to plain Markdown files.
