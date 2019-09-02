@@ -9,47 +9,33 @@ import codecs
 import argparse
 import hashlib  # for image URL->path hashing
 from urllib.request import urlopen
-
+import html2text
 
 def processPostBodyForImages(postBody, imagesPath, imagesUrlPath):
-    tumblrImageUrl = re.compile(r"https?://[0-z.]+tumblr\.com/[0-z_/]+(\.jpe?g|\.png|\.gif)")
+    # Coding pattern recommended by http://docs.python.org/2/faq/design.html#why-can-t-i-use-an-assignment-in-an-expression
+    tumblrImageUrl = re.compile(r"(https?://[0-z.]+tumblr\.com/[0-z_/]+(tumblr_inline[0-z_]+\.(?:jpe?g|png|gif)))")
 
-    while True:
+    # Create the image folder if it does not exist
+    if not os.path.exists(imagesPath):
+        os.makedirs(imagesPath)
 
-        # Coding pattern recommended by http://docs.python.org/2/faq/design.html#why-can-t-i-use-an-assignment-in-an-expression
-        imageMatch = re.search(tumblrImageUrl, postBody)
-        if not imageMatch:
-            break
+    matches = re.findall(tumblrImageUrl, postBody)
 
-        concreteImageUrl = imageMatch.group(0)
-        concreteImageExtension = imageMatch.group(1)
-        imageHash = hashlib.sha256(concreteImageUrl.encode('utf-8')).hexdigest()
+    for imageMatch in matches:
+        concreteImageUrl = imageMatch[0]
+        concreteImageName = imageMatch[1]
 
-        # Create the image folder if it does not exist
-        if not os.path.exists(imagesPath):
-            os.makedirs(imagesPath)
-
-        concreteImagePath = os.path.join(imagesPath, imageHash + concreteImageExtension)
-        imageOutputUrlPath = os.path.join(imagesUrlPath, imageHash + concreteImageExtension)
-
+        concreteImagePath = os.path.join(imagesPath, concreteImageName)
+        imageOutputUrlPath = os.path.join(imagesUrlPath, concreteImageName)
         # Assumes that all images are downloaded in full by httpclient, does not check for file integrity
-        if os.path.exists(concreteImagePath):
-
-            # This image was already downloaded, so just replace the URL in body
-
-            postBody = postBody.replace(concreteImageUrl, imageOutputUrlPath)
-            print("Found image url", concreteImageUrl, "already downloaded to path", concreteImagePath)
-        else:
-
+        if not os.path.exists(concreteImagePath):
             # Download the image and then replace the URL in body
-
             imageContent = urlopen(concreteImageUrl).read()
             f = open(concreteImagePath, 'wb')
             f.write(imageContent)
             f.close()
 
-            postBody = postBody.replace(concreteImageUrl, imageOutputUrlPath)
-            print("Downloaded image url", concreteImageUrl, "to path", concreteImagePath)
+        postBody = postBody.replace(concreteImageUrl, imageOutputUrlPath)
 
     return postBody
 
@@ -81,85 +67,83 @@ def downloader(apiKey, host, postsPath, downloadImages, imagesPath, imagesUrlPat
                 posts_per_type[post['type']] += 1
             except KeyError:
                 posts_per_type[post['type']] = 1
-
+            # 2011-12-13 17:00:00 GMT
             postDate = datetime.strptime(post["date"], "%Y-%m-%d %H:%M:%S %Z")
 
-            if post['type'] == 'text':
+            body = ""
 
+            if post['type'] == 'text':
+                post["tags"].append("text")
                 title = post["title"]
-                body = post["body"]
+                body = body + post["body"]
 
             elif post["type"] == "photo":
-                title = "Photo post"
-                body = ""
-                photos = post["photos"]
-                for photo in photos:
-                    b = "{% img " + photo["original_size"]["url"] + " %}\n" #+ post["caption"]
-                    b = processPostBodyForImages(b, imagesPath, imagesUrlPath)
-                    body = body +b
-                #body = "{% img " + post["photos"][0]["original_size"]["url"] + " %}\n\n" + post["caption"]
-                body = body + post["caption"]
+                title = post["summary"]
+                post["tags"].append("photo")
+                for photo in post["photos"]:
+                    body = body + "<img src='" + photo["original_size"]["url"] + "'/>" #+ post["caption"]
 
             elif post["type"] == "video":
-                title = "Video post"
+                title = post["summary"]
+                post["tags"].append("video")
 
-                # Grab the widest embed code
+                # todo, assuming youtube need to export shortcode like {{ youtube(id="WJ02eSfGmMQ") }}
+                body = body + '<a href="' + post["permalink_url"]   + '"><img alt="'+ post["summary"] +'" src="' + post["thumbnail_url"]+'"></a>'
 
-                known_width = 0
-                for player in post["player"]:
-                    if player["width"] > known_width:
-                        player_code = player["embed_code"]
-
-                body = str(player_code) + "\n\n" + post["caption"]
-
+            #no thanks
             elif post["type"] == "link":
-                title = "Link post"
-
-                body = "<" + post["url"] + ">\n\n" + post["description"]
-
+                print("unhandled link post", post)
+                continue
             elif post["type"] == "quote":
-
-                title = "Quote post"
-
-                body = post["source"] + "\n\n<blockquote>" + post["text"] + "</blockquote>"
-
+                print("unhandled quote post", post)
+                continue
             else:
-                title = "(unknown post type)"
-                body = "missing body"
+                print("unhandled unknown type", post)
+                continue
 
-                print(post)
 
             # Download images if requested
             if downloadImages:
-                pass # выкачиваем изображения выше
-                #body = processPostBodyForImages(body, imagesPath, imagesUrlPath)
+                body = processPostBodyForImages(body, imagesPath, imagesUrlPath)
 
             # We have completely processed the post and the Markdown is ready to be output
 
-            # Generate a slug out of the title: replace weird characters …
-            slug = re.sub('[^0-9a-zA-Z- ]', '', title.lower().strip())
-
-            # … collapse spaces …
-            slug = re.sub(' +', ' ', slug)
-
-            # … convert spaces to tabs …
-            slug = slug.replace(' ', '-')
-
-            # … and prepend date
-            slug = postDate.strftime("%Y-%m-%d-") + slug
+            slug = post["slug"]
 
             # If path does not exist, make it
             if not os.path.exists(postsPath):
                 os.makedirs(postsPath)
 
-            f = codecs.open(findFileName(postsPath, slug), encoding='utf-8', mode="w")
+            f = codecs.open(findFileName(postsPath, slug), encoding='utf-8', mode="w+")
 
             tags = ""
             if len(post["tags"]):
-                tags = "\ntags:\n- " + "\n- ".join(post["tags"])
+                tags = ', '.join('"{0}"'.format(w) for w in post["tags"])
 
-            f.write("---\nlayout: post\ndate: " + post["date"] + tags + "\ntitle: \"" + title.replace('"',
-                                                                                                      '\\"') + "\"\n---\n" + body)
+            # html2text strips bad looking tags like our more
+            body = body.replace("<!-- more -->","[[MORE]]")
+
+            # Otherwise it line breaks inside of links and other markdown structures
+            text_maker = html2text.HTML2Text()
+            text_maker.body_width = 0
+            body = text_maker.handle(body)
+
+            # now bring it back
+            body = body.replace("[[MORE]]", "<!-- more -->")
+
+
+            f.write(
+                "+++\n" +
+                "date = " + postDate.isoformat('T') + ".000Z\n" +
+                "title = \"" + title.replace('"','\\"') + "\"\n" +
+                "draft = false\n" +
+                "in_search_index = true\n" +
+                "aliases = [\"/post/" + str(post["id"]) + "/" + post["slug"]+  "\", " +
+                "\"/post/" + post["slug"]+  "\"]\n" +
+                "[taxonomies]\n" +
+                "tags = [" + tags + "]\n" +
+                "+++\n\n" +
+                body)
 
             f.close()
 
@@ -181,7 +165,7 @@ def findFileName(path, slug):
 
 def makeFileName(path, slug, exists=0):
     suffix = "" if exists == 0 else "-" + str(exists + 1)
-    return os.path.join(path, slug) + suffix + ".markdown"
+    return os.path.join(path, slug) + suffix + ".md"
 
 
 def main():
